@@ -26,6 +26,8 @@ object Constants {
   val RootPackageQualifier = "_root_"
 
   val NameSeparator = '.'
+
+  val GivenAllSymbol = "given"
 }
 
 case class QualifiedName(private val parts: NonEmptyChain[String]) {
@@ -229,6 +231,54 @@ class SourceAnalysisTraverser extends Traverser {
     importsByScope(fullPackageName).append(AnImport(name, alias, isWildcard))
   }
 
+  def synthesizedGivenTypeName(types: Chain[QualifiedName]): Option[QualifiedName] =
+    NonEmptyChain
+      .fromChain(types.mapFilter(_.simpleName))
+      .map(names => QualifiedName.of(s"given_${names.intercalate("_")}"))
+
+  def recordGivenDefinition(nameNode: Name, types: Chain[QualifiedName]): Unit = {
+    nameNode match {
+      case Name.Anonymous() =>
+      case _                => extractName(nameNode).foreach(recordProvidedName(_))
+    }
+    synthesizedGivenTypeName(types).foreach(recordProvidedName(_))
+    recordProvidedName(QualifiedName.of(Constants.GivenAllSymbol))
+  }
+
+  def recordImporters(importers: List[Importer], providesSelectedNames: Boolean): Unit =
+    importers.foreach({ case Importer(ref, importees) =>
+      // Importers will always have a named ref
+      val baseName = extractName(ref).getOrElse(QualifiedName.Root)
+      importees.foreach(importee => {
+        importee match {
+          case Importee.Wildcard() => recordImport(baseName, None, true)
+          case Importee.Name(nameNode) =>
+            extractName(nameNode).foreach { name =>
+              recordImport(baseName.qualify(name), None, false)
+              if (providesSelectedNames) recordProvidedName(name)
+            }
+          case Importee.Rename(nameNode, aliasNode) =>
+            // If a type is aliased to `_`, it is not brought into scope. We still record
+            // the import though, since compilation will fail if an import is not present.
+            val aliasName = extractName(aliasNode).filterNot(_.fullName == "_")
+            extractName(nameNode).foreach(name => recordImport(baseName.qualify(name), aliasName.map(_.fullName), false))
+            if (providesSelectedNames) aliasName.foreach(recordProvidedName(_))
+          case Importee.GivenAll() =>
+            recordImport(baseName.qualify(Constants.GivenAllSymbol), None, false)
+            if (providesSelectedNames) recordProvidedName(QualifiedName.of(Constants.GivenAllSymbol))
+          case Importee.Given(tpe) =>
+            val types = extractNamesFromTypeTree(tpe)
+            synthesizedGivenTypeName(types).foreach { key =>
+              recordImport(baseName.qualify(key), None, false)
+              if (providesSelectedNames) recordProvidedName(key)
+            }
+            if (providesSelectedNames) recordProvidedName(QualifiedName.of(Constants.GivenAllSymbol))
+            types.iterator.foreach(recordConsumedSymbol(_))
+          case _ =>
+        }
+      })
+    })
+
   def recordConsumedSymbol(name: QualifiedName): Unit = {
     val fullPackageName = currentScope
     if (!consumedSymbolsByScope.contains(fullPackageName)) {
@@ -247,6 +297,7 @@ class SourceAnalysisTraverser extends Traverser {
 
   def visitTemplate(templ: Template, name: String): Unit = {
     templ.inits.foreach(init => apply(init))
+    templ.derives.foreach(deriv => extractNamesFromTypeTree(deriv).iterator.foreach(recordConsumedSymbol(_)))
     withNamePart(
       name,
       () => {
@@ -356,7 +407,7 @@ class SourceAnalysisTraverser extends Traverser {
       decltpe.foreach(tpe => {
         extractNamesFromTypeTree(tpe).iterator.foreach(recordConsumedSymbol(_))
       })
-      super.apply(rhs)
+      apply(rhs)
     }
 
     case Defn.Var(mods, pats, decltpe, rhs) => {
@@ -367,7 +418,7 @@ class SourceAnalysisTraverser extends Traverser {
       decltpe.foreach(tpe => {
         extractNamesFromTypeTree(tpe).iterator.foreach(recordConsumedSymbol(_))
       })
-      super.apply(rhs)
+      apply(rhs)
     }
 
     case Defn.Def(mods, nameNode, tparams, params, decltpe, body) => {
@@ -382,6 +433,30 @@ class SourceAnalysisTraverser extends Traverser {
       params.foreach(param => apply(param))
 
       withSuppressProvidedNames(() => apply(body))
+    }
+
+    case defn: Defn.Given => {
+      visitMods(defn.mods)
+      val parentTypes = Chain.fromSeq(defn.templ.inits).flatMap { init =>
+        apply(init)
+        extractNamesFromTypeTree(init.tpe)
+      }
+      recordGivenDefinition(defn.name, parentTypes)
+      defn.paramClauseGroup.foreach(apply(_))
+      withSuppressProvidedNames(() => {
+        apply(defn.templ.self)
+        apply(defn.templ.early)
+        apply(defn.templ.stats)
+      })
+    }
+
+    case defn: Defn.GivenAlias => {
+      visitMods(defn.mods)
+      val declTypes = extractNamesFromTypeTree(defn.decltpe)
+      recordGivenDefinition(defn.name, declTypes)
+      defn.paramClauseGroup.foreach(apply(_))
+      declTypes.iterator.foreach(recordConsumedSymbol(_))
+      withSuppressProvidedNames(() => apply(defn.body))
     }
 
     case Decl.Def(mods, _nameNode, tparams, params, decltpe) => {
@@ -401,31 +476,9 @@ class SourceAnalysisTraverser extends Traverser {
       extractNamesFromTypeTree(decltpe).iterator.foreach(recordConsumedSymbol(_))
     }
 
-    case Import(importers) => {
-      importers.foreach({ case Importer(ref, importees) =>
-        // Importers will always have a named ref
-        val baseName = extractName(ref).getOrElse(QualifiedName.Root)
-        importees.foreach(importee => {
-          importee match {
-            case Importee.Wildcard() => recordImport(baseName, None, true)
-            case Importee.Name(nameNode) => {
-              extractName(nameNode).foreach { name =>
-                recordImport(baseName.qualify(name), None, false)
-              }
-            }
-            case Importee.Rename(nameNode, aliasNode) => {
-              extractName(nameNode).foreach { name =>
-                // If a type is aliased to `_`, it is not brought into scope. We still record
-                // the import though, since compilation will fail if an import is not present.
-                val alias = extractName(aliasNode).map(_.fullName).filterNot(_ == "_")
-                recordImport(baseName.qualify(name), alias, false)
-              }
-            }
-            case _ =>
-          }
-        })
-      })
-    }
+    case Import(importers) => recordImporters(importers, providesSelectedNames = false)
+
+    case Export(importers) => recordImporters(importers, providesSelectedNames = true)
 
     case Init(tpe, _name, argss) => {
       extractNamesFromTypeTree(tpe).iterator.foreach(recordConsumedSymbol(_))

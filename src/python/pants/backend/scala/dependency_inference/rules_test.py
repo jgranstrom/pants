@@ -449,3 +449,100 @@ def test_recursive_objects(rule_runner: RuleRunner) -> None:
         InferredDependencies,
         [InferScalaSourceDependencies(ScalaSourceDependenciesInferenceFieldSet.create(target_d))],
     ) == InferredDependencies([target_b.address])
+
+
+@maybe_skip_jdk_test
+def test_infer_scala3_given_dependencies(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    rule_runner.write_files(
+        {
+            "shows/BUILD": "scala_sources()",
+            "shows/Show.scala": dedent(
+                """\
+                package s
+                trait Show[A] { def show(a: A): String }
+                """
+            ),
+            "givens/BUILD": "scala_sources()",
+            "givens/Givens.scala": dedent(
+                """\
+                package p
+                import s.Show
+                given intShow: Show[Int] with { def show(a: Int): String = a.toString }
+                """
+            ),
+            "byname/BUILD": "scala_sources()",
+            "byname/ByName.scala": dedent(
+                """\
+                package q
+                import p.intShow
+                object ByName { val x = intShow }
+                """
+            ),
+            "bytype/BUILD": "scala_sources()",
+            "bytype/ByType.scala": dedent(
+                """\
+                package q
+                import s.Show
+                import p.{given Show[Int]}
+                object ByType { val x = summon[Show[Int]] }
+                """
+            ),
+            "byall/BUILD": "scala_sources()",
+            "byall/ByAll.scala": dedent(
+                """\
+                package q
+                import s.Show
+                import p.given
+                object ByAll { val x = summon[Show[Int]] }
+                """
+            ),
+        }
+    )
+    givens = Address("givens", relative_file_path="Givens.scala")
+    for path, fname in [
+        ("byname", "ByName.scala"),
+        ("bytype", "ByType.scala"),
+        ("byall", "ByAll.scala"),
+    ]:
+        tgt = rule_runner.get_target(Address(path, relative_file_path=fname))
+        deps = rule_runner.request(
+            InferredDependencies,
+            [InferScalaSourceDependencies(ScalaSourceDependenciesInferenceFieldSet.create(tgt))],
+        )
+        assert givens in deps.include, f"{fname} should infer a dependency on the given's file"
+
+
+@maybe_skip_jdk_test
+def test_infer_scala3_top_level_definition_dependency(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    rule_runner.write_files(
+        {
+            "foo/BUILD": "scala_sources()",
+            "foo/Foo.scala": dedent(
+                """\
+                package example
+                val foo = "foo"
+                """
+            ),
+            "bar/BUILD": "scala_sources()",
+            "bar/Bar.scala": dedent(
+                """\
+                package example
+                val bar = foo
+                """
+            ),
+        }
+    )
+    tgt = rule_runner.get_target(Address("bar", relative_file_path="Bar.scala"))
+    deps = rule_runner.request(
+        InferredDependencies,
+        [InferScalaSourceDependencies(ScalaSourceDependenciesInferenceFieldSet.create(tgt))],
+    )
+    assert Address("foo", relative_file_path="Foo.scala") in deps.include

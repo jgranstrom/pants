@@ -456,7 +456,9 @@ def test_import_root_pacjage(rule_runner: RuleRunner) -> None:
     )
 
     assert sorted(analysis.fully_qualified_consumed_symbols()) == [
+        "foo.???",
         "foo.Bar",
+        "io.circe.syntax.???",
     ]
 
 
@@ -875,5 +877,202 @@ def test_new_given_syntax_sip64(rule_runner: RuleRunner) -> None:
         "foo.Int",
         "foo.Ord",
         "foo.T",
+    ]
+    assert sorted(symbol.name for symbol in analysis.provided_symbols) == [
+        "foo.Ord",
+        "foo.given",
+        "foo.given_Ord_Int",
         "foo.intOrd",
     ]
+
+
+def test_given_alias(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+
+            given intShow: Show[Int] = new Show[Int] {}
+            """
+        ),
+    )
+    provided = {symbol.name for symbol in analysis.provided_symbols}
+    assert "foo.intShow" in provided
+    assert "foo.given_Show_Int" in provided
+    assert "foo.given" in provided
+    assert "foo.intShow" not in set(analysis.fully_qualified_consumed_symbols())
+
+
+def test_anonymous_given(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+
+            given Show[Int] = new Show[Int] {}
+            given Ordering[Long] with {}
+            """
+        ),
+    )
+    provided = {symbol.name for symbol in analysis.provided_symbols}
+    assert "foo.given_Show_Int" in provided
+    assert "foo.given_Ordering_Long" in provided
+    assert "foo.given" in provided
+
+
+def test_export(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+
+            object Api:
+              export bar.Wrapped.helper
+            """
+        ),
+    )
+    assert "foo.Api.helper" in {symbol.name for symbol in analysis.provided_symbols}
+    imports = {imp.name for imps in analysis.imports_by_scope.values() for imp in imps}
+    assert "bar.Wrapped.helper" in imports
+
+
+def test_export_rename(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+
+            object Api:
+              export bar.Wrapped.{helper => h}
+            """
+        ),
+    )
+    provided = {symbol.name for symbol in analysis.provided_symbols}
+    assert "foo.Api.h" in provided
+    assert "foo.Api.helper" not in provided
+    imports = {imp.name for imps in analysis.imports_by_scope.values() for imp in imps}
+    assert "bar.Wrapped.helper" in imports
+
+
+def test_extension(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+
+            extension (s: Widget) def render: String = s.toString
+            """
+        ),
+    )
+    assert "foo.render" in {symbol.name for symbol in analysis.provided_symbols}
+    assert "foo.Widget" in set(analysis.fully_qualified_consumed_symbols())
+
+
+def test_scala3_import_forms(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+            import a.*
+            import b.given
+            import c.{given, *}
+            import d.{given Ord[Int]}
+            import e.intOrd
+            object User
+            """
+        ),
+    )
+    imports = {imp.name for imps in analysis.imports_by_scope.values() for imp in imps}
+    assert "a" in imports
+    assert "b.given" in imports
+    assert "c.given" in imports
+    assert "c" in imports
+    assert "d.given_Ord_Int" in imports
+    assert "e.intOrd" in imports
+    consumed = set(analysis.fully_qualified_consumed_symbols())
+    assert "foo.Ord" in consumed
+    assert "foo.Int" in consumed
+
+
+def test_derives(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+            case class Widget(x: Int) derives Show
+            """
+        ),
+    )
+    assert "foo.Show" in set(analysis.fully_qualified_consumed_symbols())
+
+
+def test_given_using_params(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package foo
+            given listShow[A](using ea: ElemShow[A]): Show[List[A]] = new Show[List[A]] {}
+            """
+        ),
+    )
+    assert "foo.ElemShow" in set(analysis.fully_qualified_consumed_symbols())
+
+
+def test_top_level_definition_reference(rule_runner: RuleRunner) -> None:
+    rule_runner.set_options(
+        args=["-ldebug", "--scala-version-for-resolve={'jvm-default':'3.3.0'}"],
+        env_inherit=PYTHON_BOOTSTRAP_ENV,
+    )
+    analysis = _analyze(
+        rule_runner,
+        textwrap.dedent(
+            """\
+            package example
+            val bar = foo
+            def baz = qux
+            """
+        ),
+    )
+    consumed = set(analysis.fully_qualified_consumed_symbols())
+    assert "example.foo" in consumed
+    assert "example.qux" in consumed
