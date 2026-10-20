@@ -221,26 +221,27 @@ class PantsDaemon(PantsDaemonProcessManager):
 
             self._initialize_metadata(options_fingerprint)
 
-            # Check periodically whether the core is valid, and exit if it is not.
-            while self._core.is_valid():
-                time.sleep(self.JOIN_TIMEOUT_SECONDS)
+            try:
+                # Check periodically whether the core is valid, and exit if it is not.
+                while self._core.is_valid():
+                    time.sleep(self.JOIN_TIMEOUT_SECONDS)
+            finally:
+                # We're exiting: purge our metadata to prevent new connections, then join the server
+                # to avoid interrupting ongoing runs.
+                self.purge_metadata(force=True)
+                self._logger.info("Waiting for ongoing runs to complete before exiting...")
+                native_engine.nailgun_server_await_shutdown(self._server)
 
-            # We're exiting: purge our metadata to prevent new connections, then join the server
-            # to avoid interrupting ongoing runs.
-            self.purge_metadata(force=True)
-            self._logger.info("Waiting for ongoing runs to complete before exiting...")
-            native_engine.nailgun_server_await_shutdown(self._server)
+                # Shutdown the PantsDaemonCore, which will shut down any live Scheduler.
+                self._logger.info("Waiting for Sessions to complete before exiting...")
+                self._core.shutdown()
 
-            # Shutdown the PantsDaemonCore, which will shut down any live Scheduler.
-            self._logger.info("Waiting for Sessions to complete before exiting...")
-            self._core.shutdown()
+                # Shutdown the executor. The shutdown method will log if that takes an unexpected
+                # amount of time, so we only log at debug here.
+                self._logger.debug("Waiting for tasks to complete before exiting...")
+                self._executor.shutdown(_SHUTDOWN_TIMEOUT_SECS)
 
-            # Shutdown the executor. The shutdown method will log if that takes an unexpected
-            # amount of time, so we only log at debug here.
-            self._logger.debug("Waiting for tasks to complete before exiting...")
-            self._executor.shutdown(_SHUTDOWN_TIMEOUT_SECS)
-
-            self._logger.info("Exiting pantsd")
+                self._logger.info("Exiting pantsd")
 
 
 def launch_new_pantsd_instance():

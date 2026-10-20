@@ -115,6 +115,7 @@ class ExceptionSinkIntegrationTest(PantsDaemonIntegrationTestBase):
                     pid, signum, signame, read_file(pid_specific_log_file)
                 )
                 assert_graceful_signal_log_matches(pid, signum, signame, read_file(shared_log_file))
+                assert "Exiting pantsd" in read_file(os.path.join(ctx.workdir, "pants.log"))
 
     def test_dumps_traceback_on_sigabrt(self):
         # SIGABRT sends a traceback to the log file for the current process thanks to
