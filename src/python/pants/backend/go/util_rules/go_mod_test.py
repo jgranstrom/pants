@@ -16,6 +16,7 @@ from pants.backend.go.util_rules.go_mod import (
     OwningGoModRequest,
 )
 from pants.build_graph.address import Address
+from pants.core.target_types import FilesGeneratorTarget, FileTarget
 from pants.engine.rules import QueryRule
 from pants.testutil.rule_runner import RuleRunner
 
@@ -29,7 +30,7 @@ def rule_runner() -> RuleRunner:
             QueryRule(OwningGoMod, [OwningGoModRequest]),
             QueryRule(GoModInfo, [GoModInfoRequest]),
         ],
-        target_types=[GoModTarget, GoPackageTarget],
+        target_types=[GoModTarget, GoPackageTarget, FilesGeneratorTarget, FileTarget],
     )
     rule_runner.set_options([], env_inherit={"PATH"})
     return rule_runner
@@ -59,6 +60,30 @@ def test_owning_go_mod(rule_runner: RuleRunner) -> None:
     assert_owner(Address("dir"), Address("", target_name="mod"))
     assert_owner(Address("dir/subdir"), Address("dir/subdir", target_name="mod"))
     assert_owner(Address("dir/subdir/another"), Address("dir/subdir", target_name="mod"))
+
+
+def test_owning_go_mod_with_root_target_generator(rule_runner: RuleRunner) -> None:
+    rule_runner.write_files(
+        {
+            "go.mod": "",
+            "f.go": "",
+            "BUILD": (
+                "go_mod(name='mod')\ngo_package(name='pkg')\nfiles(name='files', sources=['*.txt'])"
+            ),
+            **{f"f{i}.txt": "" for i in range(100)},
+            "dir/go.mod": "",
+            "dir/BUILD": "go_mod(name='mod')",
+            "dir/pkg/f.go": "",
+            "dir/pkg/BUILD": "go_package()",
+        }
+    )
+
+    def assert_owner(pkg: Address, mod: Address) -> None:
+        owner = rule_runner.request(OwningGoMod, [OwningGoModRequest(pkg)])
+        assert owner.address == mod
+
+    assert_owner(Address("", target_name="pkg"), Address("", target_name="mod"))
+    assert_owner(Address("dir/pkg"), Address("dir", target_name="mod"))
 
 
 def test_go_mod_info(rule_runner: RuleRunner) -> None:

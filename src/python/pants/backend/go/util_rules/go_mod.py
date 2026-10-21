@@ -20,10 +20,12 @@ from pants.backend.go.util_rules import binary
 from pants.backend.go.util_rules.sdk import GoSdkProcess
 from pants.base.specs import AncestorGlobSpec, RawSpecs
 from pants.build_graph.address import Address, AddressInput
+from pants.engine.addresses import Addresses
 from pants.engine.engine_aware import EngineAwareParameter
 from pants.engine.fs import Digest
 from pants.engine.internals.build_files import resolve_address
 from pants.engine.internals.graph import hydrate_sources, resolve_target, resolve_unexpanded_targets
+from pants.engine.internals.specs_rules import resolve_addresses_from_raw_specs
 from pants.engine.process import fallible_to_exec_result_or_raise
 from pants.engine.rules import collect_rules, implicitly, rule
 from pants.engine.target import (
@@ -79,14 +81,14 @@ async def find_all_go_mod_targets(targets: AllUnexpandedTargets) -> AllGoModTarg
 async def find_nearest_ancestor_go_mod(
     request: NearestAncestorGoModRequest,
 ) -> NearestAncestorGoModResult:
-    # We don't expect `go_mod` targets to be generated, so we can use UnexpandedTargets.
-    candidate_targets = await resolve_unexpanded_targets(
-        **implicitly(
-            RawSpecs(
-                ancestor_globs=(AncestorGlobSpec(request.address.spec_path),),
-                description_of_origin="the `OwningGoMod` rule",
-            )
+    ancestor_addresses = await resolve_addresses_from_raw_specs(
+        RawSpecs(
+            ancestor_globs=(AncestorGlobSpec(request.address.spec_path),),
+            description_of_origin="the `OwningGoMod` rule",
         )
+    )
+    candidate_targets = await resolve_unexpanded_targets(
+        Addresses(address for address in ancestor_addresses if not address.is_generated_target)
     )
 
     # Sort by address.spec_path in descending order so the nearest go_mod target is sorted first.
