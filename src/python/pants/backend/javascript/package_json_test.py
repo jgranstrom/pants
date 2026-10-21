@@ -14,6 +14,9 @@ from pants.backend.javascript.package_json import (
     NodePackageTestScriptField,
     NodeTestScript,
     NodeThirdPartyPackageTarget,
+    NPMDistributionTarget,
+    OwningNodePackage,
+    OwningNodePackageRequest,
     PackageJson,
     PackageJsonImports,
     PackageJsonSourceField,
@@ -39,10 +42,12 @@ def rule_runner() -> RuleRunner:
             QueryRule(AllPackageJson, ()),
             QueryRule(Owners, (OwnersRequest,)),
             QueryRule(PackageJsonImports, (PackageJsonSourceField,)),
+            QueryRule(OwningNodePackage, (OwningNodePackageRequest,)),
         ],
         target_types=[
             PackageJsonTarget,
             NodeThirdPartyPackageTarget,
+            NPMDistributionTarget,
             TargetGeneratorSourcesHelperTarget,
         ],
         objects=dict(package_json.build_file_aliases().objects),
@@ -153,6 +158,42 @@ def test_does_not_consider_package_json_without_a_target(
     all_packages = rule_runner.request(AllPackageJson, ())
     assert len(all_packages) == 1
     assert all_packages[0].name == "ham"
+
+
+def test_owning_package_is_the_nearest_package_json(rule_runner: RuleRunner) -> None:
+    rule_runner.write_files(
+        {
+            "BUILD": "package_json(name='root')",
+            "package.json": json.dumps(
+                {
+                    "name": "root",
+                    "version": "0.0.1",
+                    "dependencies": {f"dep{i}": "1.0.0" for i in range(100)},
+                }
+            ),
+            "src/js/BUILD": "package_json(name='pkg')\nnpm_distribution(name='dist')",
+            "src/js/package.json": json.dumps(
+                {"name": "ham", "version": "0.0.1", "dependencies": {"chalk": "^5.2.0"}}
+            ),
+            "src/js/lib/index.js": "",
+        }
+    )
+
+    owner = rule_runner.request(
+        OwningNodePackage, [OwningNodePackageRequest(Address("src/js/lib"))]
+    )
+    assert owner.ensure_owner().address == Address(
+        "src/js", target_name="pkg", generated_name="ham"
+    )
+    assert [tgt.address for tgt in owner.third_party] == [
+        Address("src/js", target_name="pkg", generated_name="chalk")
+    ]
+
+    root_owner = rule_runner.request(OwningNodePackage, [OwningNodePackageRequest(Address("src"))])
+    assert root_owner.ensure_owner().address == Address(
+        "", target_name="root", generated_name="root"
+    )
+    assert len(root_owner.third_party) == 100
 
 
 def test_generates_build_script_targets(

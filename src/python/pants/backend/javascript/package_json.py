@@ -25,6 +25,7 @@ from pants.core.target_types import (
 )
 from pants.core.util_rules import stripped_source_files
 from pants.engine import fs
+from pants.engine.addresses import Addresses
 from pants.engine.collection import Collection, DeduplicatedCollection
 from pants.engine.env_vars import EXTRA_ENV_VARS_USAGE_HELP
 from pants.engine.fs import CreateDigest, FileContent, GlobExpansionConjunction, PathGlobs
@@ -33,9 +34,11 @@ from pants.engine.internals.graph import (
     ResolveAllTargetGeneratorRequests,
     resolve_all_generator_target_requests,
     resolve_targets,
+    resolve_unexpanded_targets,
 )
 from pants.engine.internals.native_engine import Digest, Snapshot
 from pants.engine.internals.selectors import concurrently
+from pants.engine.internals.specs_rules import resolve_addresses_from_raw_specs
 from pants.engine.intrinsics import create_digest, digest_to_snapshot, get_digest_contents
 from pants.engine.rules import Rule, collect_rules, implicitly, rule
 from pants.engine.target import (
@@ -745,29 +748,35 @@ class OwningNodePackage:
 
 @rule
 async def find_owning_package(request: OwningNodePackageRequest) -> OwningNodePackage:
-    candidate_targets = await resolve_targets(
-        **implicitly(
-            RawSpecs(
-                ancestor_globs=(AncestorGlobSpec(request.address.spec_path),),
-                description_of_origin=f"the `{OwningNodePackage.__name__}` rule",
-            )
+    ancestor_addresses = await resolve_addresses_from_raw_specs(
+        RawSpecs(
+            ancestor_globs=(AncestorGlobSpec(request.address.spec_path),),
+            description_of_origin=f"the `{OwningNodePackage.__name__}` rule",
         )
     )
+    candidate_targets = await resolve_unexpanded_targets(
+        Addresses(address for address in ancestor_addresses if not address.is_generated_target)
+    )
     package_json_tgts = sorted(
-        (
-            tgt
-            for tgt in candidate_targets
-            if tgt.has_field(PackageJsonSourceField) and tgt.has_field(NodePackageNameField)
-        ),
+        (tgt for tgt in candidate_targets if tgt.has_field(PackageJsonSourceField)),
         key=lambda tgt: tgt.address.spec_path,
         reverse=True,
     )
-    tgt = package_json_tgts[0] if package_json_tgts else None
-    if tgt:
-        deps = await resolve_targets(**implicitly(DependenciesRequest(tgt[Dependencies])))
-        return OwningNodePackage(
-            tgt, tuple(dep for dep in deps if dep.has_field(NodeThirdPartyPackageNameField))
+    for package_json_tgt in package_json_tgts:
+        expanded = await resolve_targets(**implicitly(Addresses([package_json_tgt.address])))
+        tgt = next(
+            (
+                tgt
+                for tgt in expanded
+                if tgt.has_field(PackageJsonSourceField) and tgt.has_field(NodePackageNameField)
+            ),
+            None,
         )
+        if tgt:
+            deps = await resolve_targets(**implicitly(DependenciesRequest(tgt[Dependencies])))
+            return OwningNodePackage(
+                tgt, tuple(dep for dep in deps if dep.has_field(NodeThirdPartyPackageNameField))
+            )
     return OwningNodePackage()
 
 
